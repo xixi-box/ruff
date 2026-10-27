@@ -5888,6 +5888,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         mut bindings: Bindings<'db>,
         call_expression_tcx: TypeContext<'db>,
     ) -> Result<CallArgumentInference<'args, 'call, 'db>, CallError<'db>> {
+        const MAX_LITERAL_NARROWING_TARGETS: usize = 64;
+
         let db = self.db();
         let constraints = ConstraintSetBuilder::new();
         let initial_argument_types = argument_types.clone();
@@ -5949,13 +5951,30 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .filter_map(|(index, is_generic)| is_generic.then_some(index))
             .collect();
 
-        // Infer independently against each member of a union type context.
-        let narrow_targets = call_expression_tcx
-            .narrow_targets(db, env)
-            // We only need to attempt narrowing on generic calls, otherwise the type
-            // context has no effect.
-            .filter(|_| has_generic_context)
-            .unwrap_or_default();
+        // Only generic calls use the return context to infer type arguments.
+        let mut narrow_targets = if has_generic_context {
+            call_expression_tcx
+                .narrow_targets(db, env)
+                .unwrap_or_default()
+        } else {
+            Cow::default()
+        };
+
+        // A large literal union can otherwise require thousands of inferences for a single
+        // call. Try its literals together, keeping nonliteral alternatives separate.
+        if narrow_targets.len() > MAX_LITERAL_NARROWING_TARGETS {
+            let (literals, mut others): (Vec<_>, Vec<_>) = narrow_targets
+                .iter()
+                .copied()
+                .partition(|ty| ty.is_literal_or_union_of_literals(db, env));
+            if literals.len() > MAX_LITERAL_NARROWING_TARGETS {
+                if !others.is_empty() {
+                    others.push(UnionType::from_elements(db, env, literals));
+                }
+                // If all targets are literals, inference already falls back to the full context.
+                narrow_targets = Cow::Owned(others);
+            }
+        }
 
         // Enable the expression cache if we are going to perform multi-inference.
         let teardown_expression_cache = if !generic_arguments.is_empty()

@@ -1971,6 +1971,24 @@ late: Values = first(singleton(2))
 assert_type(late, Literal[2])
 ```
 
+For large literal unions, we try the literals together. This can widen a nested call, but each
+nonliteral alternative still supplies its own context:
+
+```py
+type Many = (
+    Literal[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    | Literal[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    | Literal[32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47]
+    | Literal[48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64]
+)
+
+wide: Many = first(singleton(64))
+assert_type(wide, Many)
+
+mixed: Many | list[int] | list[str] = identity([])
+assert_type(mixed, list[int] | list[str])
+```
+
 ## Assignability diagnostics ignore declared type
 
 The type displayed in an invalid assignment diagnostic should account for the type context, e.g., to
