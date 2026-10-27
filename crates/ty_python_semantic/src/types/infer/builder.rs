@@ -44,7 +44,7 @@ use crate::place::{
 };
 use crate::place_load::{
     ImplicitPlaceLoad, PlaceExprPrefixLoad, PlaceExprPrefixLoads, PlaceLoadFailure, PlaceLoadMode,
-    PlaceLoadResolutionStep, PlaceLoadSource, PlaceLoadSourceKind, resolve_place_load,
+    PlaceLoadSource, PlaceLoadSourceKind, PlaceLoadStep, place_load_sources,
 };
 use crate::reachability::{
     ReachabilityEvaluationCache, evaluate_reachability_with_cache, is_end_of_scope_reachable,
@@ -10746,14 +10746,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             PlaceLoadMode::AtExpression(expr_ref)
         };
         let mut resolution =
-            resolve_place_load(self.db(), self.index, self.scope(), place_expr, mode);
+            place_load_sources(self.db(), self.index, self.scope(), place_expr, mode);
         let mut place = PlaceAndQualifiers::from(Place::Undefined);
         let mut failure = None;
         let mut checked_deprecated = false;
 
         while let Some(step) = resolution.next() {
             match step {
-                PlaceLoadResolutionStep::Source(source) => {
+                PlaceLoadStep::Source(source) => {
                     if !checked_deprecated && source.is_post_lexical() {
                         // Deprecation diagnostics apply to the result of lexical name resolution,
                         // before it is combined with implicit module globals or builtins. Hence, we
@@ -10777,13 +10777,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         break;
                     }
                 }
-                PlaceLoadResolutionStep::MemberResolutionCondition(prefix_loads) => {
+                PlaceLoadStep::MemberResolutionCondition(prefix_loads) => {
                     if self.has_bound_place_expr_prefix(&prefix_loads) {
                         failure = Some(PlaceLoadFailure::NotFound);
                         break;
                     }
                 }
-                PlaceLoadResolutionStep::Exhausted(exhaustion_failure) => {
+                PlaceLoadStep::Exhausted(exhaustion_failure) => {
                     failure = Some(exhaustion_failure);
                     break;
                 }

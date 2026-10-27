@@ -29,8 +29,8 @@ use crate::{
         place_from_bindings,
     },
     place_load::{
-        ImplicitPlaceLoad, PlaceExprPrefixLoad, PlaceLoadMode, PlaceLoadResolutionStep,
-        PlaceLoadSourceKind, resolve_place_load,
+        ImplicitPlaceLoad, PlaceExprPrefixLoad, PlaceLoadMode, PlaceLoadSourceKind, PlaceLoadStep,
+        place_load_sources,
     },
     types::{
         Type, TypeContext,
@@ -404,7 +404,7 @@ fn place_condition_definition_info<'db>(
     {
         let scope = scope.to_scope_id(db, file);
         let env = ProgramEnvironment::from_scope(scope);
-        let resolution = resolve_place_load(
+        let resolution = place_load_sources(
             db,
             index,
             scope,
@@ -413,8 +413,8 @@ fn place_condition_definition_info<'db>(
         );
         for step in resolution {
             let source = match step {
-                PlaceLoadResolutionStep::Source(source) => source,
-                PlaceLoadResolutionStep::MemberResolutionCondition(prefixes) => {
+                PlaceLoadStep::Source(source) => source,
+                PlaceLoadStep::MemberResolutionCondition(prefixes) => {
                     let use_def = use_def_map(db, prefixes.scope());
                     if prefixes.iter().any(|prefix| {
                         let bindings = match prefix {
@@ -428,7 +428,7 @@ fn place_condition_definition_info<'db>(
                     }
                     continue;
                 }
-                PlaceLoadResolutionStep::Exhausted(_) => break,
+                PlaceLoadStep::Exhausted(_) => break,
             };
             let (source_info, definitely_bound) = match source.kind {
                 PlaceLoadSourceKind::Bindings(bindings) => {

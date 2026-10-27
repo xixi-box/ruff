@@ -32,7 +32,7 @@ use crate::{
     SemanticModel,
     importer::ImportRequest,
     place::{Place, PlaceAndQualifiers},
-    place_load::{PlaceLoadMode, PlaceLoadResolutionStep, resolve_place_load},
+    place_load::{PlaceLoadMode, PlaceLoadStep, place_load_sources},
     reachability::is_range_reachable,
     types::{
         KnownClass, KnownUnion, LintDiagnosticGuard, LintDiagnosticGuardBuilder,
@@ -1542,7 +1542,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let use_def = self.index.use_def_map(self.scope().file_scope_id(db));
         let snapshot =
             use_def.if_chain_start_for_use(name.scoped_use_id(db, self.program_file()))?;
-        let mut resolution = resolve_place_load(
+        let mut resolution = place_load_sources(
             db,
             self.index,
             self.scope(),
@@ -1550,7 +1550,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             PlaceLoadMode::AtNameSnapshot(snapshot),
         );
         let mut place = PlaceAndQualifiers::from(Place::Undefined);
-        while let Some(PlaceLoadResolutionStep::Source(source)) = resolution.next() {
+        while let Some(PlaceLoadStep::Source(source)) = resolution.next() {
             let constraints = resolution.narrowing_constraints_for(&source);
             place = place.or_fall_back_to(db, env, || {
                 self.infer_place_load_source(resolution.place_expr(), source, constraints)

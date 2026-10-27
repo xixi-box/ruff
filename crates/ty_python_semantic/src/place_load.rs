@@ -1,21 +1,21 @@
 //! This module combines the semantics of name resolution with the results of
-//! reaching definition analysis to expose a [`PlaceLoadResolution`], which
+//! reaching definition analysis to expose [`PlaceLoadSources`], which
 //! provides a lazy iterator over the steps that resolve the value read from a
 //! place.
 //!
-//! More specifically, a [`PlaceLoadResolution`] iterates over a series of
-//! [`PlaceLoadResolutionStep`] values, each of which represents a phase of the
+//! More specifically, [`PlaceLoadSources`] iterates over a series of
+//! [`PlaceLoadStep`] values, each of which represents a phase of the
 //! process that ultimately either supplies a definite value for a load or ends
 //! in explicit failure:
 //!
-//! - A source ([`PlaceLoadResolutionStep::Source`]) (and its associated type-
+//! - A source ([`PlaceLoadStep::Source`]) (and its associated type-
 //!   narrowing constraints) which may supply the value for a load.
-//! - A boolean condition ([`PlaceLoadResolutionStep::MemberResolutionCondition`])
+//! - A boolean condition ([`PlaceLoadStep::MemberResolutionCondition`])
 //!   that determines whether resolution continues for member loads specifically
 //!   (i.e., `foo.bar.baz` as opposed to the plain symbol `foo`). This describes
 //!   the loads of member prefixes (e.g., `foo.bar` and `foo`) that must all be
 //!   unbound before resolution continues.
-//! - A marker ([`PlaceLoadResolutionStep::Exhausted`]) which declares that the
+//! - A marker ([`PlaceLoadStep::Exhausted`]) which declares that the
 //!   resolution process ended in failure.
 //!
 //! We consume this model to different ends:
@@ -47,7 +47,7 @@
 //!     return next_value
 //! ```
 //!
-//! [`PlaceLoadResolution`] at `U` combines reaching definition analysis with a
+//! [`PlaceLoadSources`] at `U` combines reaching definition analysis with a
 //! lexical scope walk:
 //!
 //! 1. Reaching definition analysis from the use-def module supplies the binding
@@ -62,7 +62,7 @@
 //! 4. Once name resolution reaches the scope that owns value, it records
 //!    `make_counter.value` as an enclosing source of a potential value for `U`.
 //!
-//! Schematically, fully consuming the resulting [`PlaceLoadResolution`] yields:
+//! Schematically, fully consuming the resulting [`PlaceLoadSources`] yields:
 //!
 //! ```text
 //! Source(Bindings(next_value.value at U))  // unbound
@@ -75,7 +75,7 @@
 //! declaration in `next_value`.
 //!
 //! The enclosing function's binding scope terminates name resolution, even if
-//! none of its definitions supply a value at runtime. [`PlaceLoadResolution`]
+//! none of its definitions supply a value at runtime. [`PlaceLoadSources`]
 //! therefore yields `Exhausted(UnboundFree)` if both sources are exhausted
 //! instead of yielding module globals or builtins as later sources. In this
 //! example, type inference establishes that the branches in `make_counter`
@@ -97,15 +97,15 @@ use ty_python_core::{
 use crate::Db;
 
 /// Returns an iterator over the steps that resolve a value for a place load.
-pub(crate) fn resolve_place_load<'db, 'ast>(
+pub(crate) fn place_load_sources<'db, 'ast>(
     db: &'db dyn Db,
     index: &'db SemanticIndex<'db>,
     scope: ScopeId<'db>,
     place_expr: PlaceExpr,
     mode: PlaceLoadMode<'ast>,
-) -> PlaceLoadResolution<'db, 'ast> {
-    PlaceLoadResolution::new(
-        PlaceLoadResolutionContext {
+) -> PlaceLoadSources<'db, 'ast> {
+    PlaceLoadSources::new(
+        PlaceLoadContext {
             db,
             index,
             scope,
@@ -149,31 +149,30 @@ pub(crate) enum PlaceLoadMode<'ast> {
 }
 
 /// Exposes an iterator over the steps that resolve the value for a place load.
-pub(crate) struct PlaceLoadResolution<'db, 'ast> {
+pub(crate) struct PlaceLoadSources<'db, 'ast> {
     /// The place expression whose loaded value is being resolved.
     place_expr: PlaceExpr,
     /// Read-only context shared by every source-selection phase.
-    context: PlaceLoadResolutionContext<'db, 'ast>,
+    context: PlaceLoadContext<'db, 'ast>,
     /// The next node to visit in the resolution graph, or `None` after reaching a leaf.
-    next_node: Option<PlaceLoadResolutionNode<'db>>,
+    next_node: Option<PlaceLoadNode<'db>>,
     /// Narrowing constraints accumulated while resolution advances.
     constraints: PlaceLoadConstraints,
     /// Whether resolution has crossed a `global` or `nonlocal` declaration so far.
     crosses_scope_declaration: bool,
 }
 
-impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
-    type Item = PlaceLoadResolutionStep<'db>;
+impl<'db> Iterator for PlaceLoadSources<'db, '_> {
+    type Item = PlaceLoadStep<'db>;
 
-    /// Lazily yields [`PlaceLoadResolutionStep`] values to describe the resolution process.
+    /// Lazily yields [`PlaceLoadStep`] values to describe the resolution process.
     ///
     /// Internally, this traverses a directed, acyclic graph that models the resolution process.
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(current_node) = self.next_node.take() {
             match current_node {
-                PlaceLoadResolutionNode::LocalSource => {
-                    self.next_node =
-                        Some(PlaceLoadResolutionNode::AskConsumerWhetherToContinueForMember);
+                PlaceLoadNode::LocalSource => {
+                    self.next_node = Some(PlaceLoadNode::AskConsumerWhetherToContinueForMember);
 
                     if let Some((kind, exit_constraint)) =
                         self.context.local_source(self.place_expr())
@@ -183,32 +182,28 @@ impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
                             PlaceLoadSourceRole::Ordinary,
                             exit_constraint,
                         );
-                        return Some(PlaceLoadResolutionStep::Source(source));
+                        return Some(PlaceLoadStep::Source(source));
                     }
                 }
-                PlaceLoadResolutionNode::AskConsumerWhetherToContinueForMember => {
-                    self.next_node = Some(PlaceLoadResolutionNode::DecideResolutionPath);
+                PlaceLoadNode::AskConsumerWhetherToContinueForMember => {
+                    self.next_node = Some(PlaceLoadNode::DecideResolutionPath);
 
                     if let Some(prefix_loads) =
                         self.context.place_expr_prefix_loads(self.place_expr())
                     {
-                        return Some(PlaceLoadResolutionStep::MemberResolutionCondition(
-                            prefix_loads,
-                        ));
+                        return Some(PlaceLoadStep::MemberResolutionCondition(prefix_loads));
                     }
                 }
-                PlaceLoadResolutionNode::DecideResolutionPath => {
+                PlaceLoadNode::DecideResolutionPath => {
                     self.next_node = Some(self.decide_resolution_path());
                 }
-                PlaceLoadResolutionNode::DunderClassSource {
+                PlaceLoadNode::DunderClassSource {
                     definition,
                     enclosing_scopes,
                 } => {
-                    self.next_node = Some(PlaceLoadResolutionNode::EnclosingScopeSource(
-                        enclosing_scopes,
-                    ));
+                    self.next_node = Some(PlaceLoadNode::EnclosingScopeSource(enclosing_scopes));
 
-                    return Some(PlaceLoadResolutionStep::Source(
+                    return Some(PlaceLoadStep::Source(
                         PlaceLoadConstraints::unnarrowed_source(
                             PlaceLoadSourceKind::Implicit(ImplicitPlaceLoad::DunderClass(
                                 definition,
@@ -217,20 +212,18 @@ impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
                         ),
                     ));
                 }
-                PlaceLoadResolutionNode::EnclosingScopeSource(mut scopes) => {
+                PlaceLoadNode::EnclosingScopeSource(mut scopes) => {
                     let (next_node, source) = self.resolve_enclosing_scopes(&mut scopes);
                     self.next_node = Some(next_node);
 
                     if let Some(source) = source {
-                        return Some(PlaceLoadResolutionStep::Source(source));
+                        return Some(PlaceLoadStep::Source(source));
                     }
                 }
-                PlaceLoadResolutionNode::ImplicitClassBodySource(forwarded_global_snapshot) => {
+                PlaceLoadNode::ImplicitClassBodySource(forwarded_global_snapshot) => {
                     self.next_node = Some(forwarded_global_snapshot.map_or(
-                        PlaceLoadResolutionNode::ExplicitGlobalSource(
-                            PlaceLoadSourceRole::Ordinary,
-                        ),
-                        PlaceLoadResolutionNode::ForwardedGlobalSnapshotSource,
+                        PlaceLoadNode::ExplicitGlobalSource(PlaceLoadSourceRole::Ordinary),
+                        PlaceLoadNode::ForwardedGlobalSnapshotSource,
                     ));
 
                     if self.context.is_class_body_scope()
@@ -243,10 +236,10 @@ impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
                             PlaceLoadSourceRole::Ordinary,
                             None,
                         );
-                        return Some(PlaceLoadResolutionStep::Source(source));
+                        return Some(PlaceLoadStep::Source(source));
                     }
                 }
-                PlaceLoadResolutionNode::ForwardedGlobalSnapshotSource(snapshot) => {
+                PlaceLoadNode::ForwardedGlobalSnapshotSource(snapshot) => {
                     let ForwardedGlobalSnapshot {
                         bindings,
                         enclosing_scope,
@@ -264,9 +257,9 @@ impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
                     // module never defines the name itself. Do not let those bindings hide an
                     // implicit global or builtin when the forwarded assignment did not run.
                     self.next_node = Some(if has_explicit_global {
-                        PlaceLoadResolutionNode::ExplicitGlobalSource(PlaceLoadSourceRole::Ordinary)
+                        PlaceLoadNode::ExplicitGlobalSource(PlaceLoadSourceRole::Ordinary)
                     } else {
-                        PlaceLoadResolutionNode::ImplicitGlobalSource
+                        PlaceLoadNode::ImplicitGlobalSource
                     });
 
                     let source = self.constraints.source(
@@ -279,18 +272,18 @@ impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
                             ),
                         )),
                     );
-                    return Some(PlaceLoadResolutionStep::Source(source));
+                    return Some(PlaceLoadStep::Source(source));
                 }
-                PlaceLoadResolutionNode::ExplicitGlobalSource(role) => {
-                    self.next_node = Some(PlaceLoadResolutionNode::ImplicitGlobalSource);
+                PlaceLoadNode::ExplicitGlobalSource(role) => {
+                    self.next_node = Some(PlaceLoadNode::ImplicitGlobalSource);
 
                     if let Some(source) = self.resolve_global(role) {
-                        return Some(PlaceLoadResolutionStep::Source(source));
+                        return Some(PlaceLoadStep::Source(source));
                     }
                 }
-                PlaceLoadResolutionNode::ImplicitGlobalSource => {
+                PlaceLoadNode::ImplicitGlobalSource => {
                     if let Some(name) = self.loaded_symbol_name().cloned() {
-                        self.next_node = Some(PlaceLoadResolutionNode::BuiltinSource(name.clone()));
+                        self.next_node = Some(PlaceLoadNode::BuiltinSource(name.clone()));
 
                         let source = self.constraints.source(
                             PlaceLoadSourceKind::Implicit(
@@ -302,25 +295,23 @@ impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
                             PlaceLoadSourceRole::Ordinary,
                             None,
                         );
-                        return Some(PlaceLoadResolutionStep::Source(source));
+                        return Some(PlaceLoadStep::Source(source));
                     }
 
-                    self.next_node =
-                        Some(PlaceLoadResolutionNode::Failure(PlaceLoadFailure::NotFound));
+                    self.next_node = Some(PlaceLoadNode::Failure(PlaceLoadFailure::NotFound));
                 }
-                PlaceLoadResolutionNode::BuiltinSource(name) => {
-                    self.next_node =
-                        Some(PlaceLoadResolutionNode::Failure(PlaceLoadFailure::NotFound));
+                PlaceLoadNode::BuiltinSource(name) => {
+                    self.next_node = Some(PlaceLoadNode::Failure(PlaceLoadFailure::NotFound));
 
-                    return Some(PlaceLoadResolutionStep::Source(
+                    return Some(PlaceLoadStep::Source(
                         PlaceLoadConstraints::unnarrowed_source(
                             PlaceLoadSourceKind::Implicit(ImplicitPlaceLoad::Builtin(name)),
                             PlaceLoadSourceRole::Ordinary,
                         ),
                     ));
                 }
-                PlaceLoadResolutionNode::Failure(failure) => {
-                    return Some(PlaceLoadResolutionStep::Exhausted(failure));
+                PlaceLoadNode::Failure(failure) => {
+                    return Some(PlaceLoadStep::Exhausted(failure));
                 }
             }
         }
@@ -329,20 +320,20 @@ impl<'db> Iterator for PlaceLoadResolution<'db, '_> {
     }
 }
 
-impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
-    fn new(context: PlaceLoadResolutionContext<'db, 'ast>, place_expr: PlaceExpr) -> Self {
+impl<'db, 'ast> PlaceLoadSources<'db, 'ast> {
+    fn new(context: PlaceLoadContext<'db, 'ast>, place_expr: PlaceExpr) -> Self {
         let crosses_scope_declaration =
             context.symbol_has_scope_declaration(PlaceExprRef::from(&place_expr));
         Self {
             context,
             place_expr,
-            next_node: Some(PlaceLoadResolutionNode::LocalSource),
+            next_node: Some(PlaceLoadNode::LocalSource),
             constraints: PlaceLoadConstraints::default(),
             crosses_scope_declaration,
         }
     }
 
-    fn decide_resolution_path(&mut self) -> PlaceLoadResolutionNode<'db> {
+    fn decide_resolution_path(&mut self) -> PlaceLoadNode<'db> {
         let db = self.context.db;
         let scope = self.context.scope;
         let file_scope = scope.file_scope_id(db);
@@ -358,21 +349,19 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
 
             let class_body_global_fallback = self.context.is_class_body_scope() && symbol_is_local;
             if self.context.skips_non_global_scopes(symbol_id) || class_body_global_fallback {
-                return PlaceLoadResolutionNode::ExplicitGlobalSource(
-                    if class_body_global_fallback {
-                        PlaceLoadSourceRole::ClassBodyGlobalFallback
-                    } else {
-                        PlaceLoadSourceRole::Ordinary
-                    },
-                );
+                return PlaceLoadNode::ExplicitGlobalSource(if class_body_global_fallback {
+                    PlaceLoadSourceRole::ClassBodyGlobalFallback
+                } else {
+                    PlaceLoadSourceRole::Ordinary
+                });
             }
         }
 
         if symbol_is_local {
             return if scope.node(db).scope_kind().is_module() {
-                PlaceLoadResolutionNode::ImplicitGlobalSource
+                PlaceLoadNode::ImplicitGlobalSource
             } else {
-                PlaceLoadResolutionNode::Failure(PlaceLoadFailure::UnboundLocal)
+                PlaceLoadNode::Failure(PlaceLoadFailure::UnboundLocal)
             };
         }
 
@@ -384,19 +373,19 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
             && symbol.name() == "__class__"
             && let Some(definition) = self.context.dunder_class_cell_definition()
         {
-            PlaceLoadResolutionNode::DunderClassSource {
+            PlaceLoadNode::DunderClassSource {
                 definition,
                 enclosing_scopes: scopes,
             }
         } else {
-            PlaceLoadResolutionNode::EnclosingScopeSource(scopes)
+            PlaceLoadNode::EnclosingScopeSource(scopes)
         }
     }
 
     fn resolve_enclosing_scopes(
         &mut self,
         scopes: &mut AncestorsIter<'db>,
-    ) -> (PlaceLoadResolutionNode<'db>, Option<PlaceLoadSource<'db>>) {
+    ) -> (PlaceLoadNode<'db>, Option<PlaceLoadSource<'db>>) {
         let db = self.context.db;
         let scope = self.context.scope;
         let file_scope = scope.file_scope_id(db);
@@ -446,7 +435,7 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
                         if forwards_to_global {
                             self.crosses_scope_declaration = true;
                             return (
-                                PlaceLoadResolutionNode::ImplicitClassBodySource(Some(
+                                PlaceLoadNode::ImplicitClassBodySource(Some(
                                     ForwardedGlobalSnapshot {
                                         bindings,
                                         enclosing_scope: enclosing_file_scope,
@@ -500,7 +489,7 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
 
             if forwards_to_global {
                 self.crosses_scope_declaration = true;
-                return (PlaceLoadResolutionNode::ImplicitClassBodySource(None), None);
+                return (PlaceLoadNode::ImplicitClassBodySource(None), None);
             }
             // Keep walking across `nonlocal` declarations until reaching the owning scope.
             if enclosing_place.as_symbol().is_some_and(Symbol::is_nonlocal) {
@@ -528,7 +517,7 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
             );
         }
 
-        (PlaceLoadResolutionNode::ImplicitClassBodySource(None), None)
+        (PlaceLoadNode::ImplicitClassBodySource(None), None)
     }
 
     /// Resolves a load that has reached the module's explicit global scope.
@@ -580,11 +569,11 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
         ))
     }
 
-    fn node_after_enclosing_scope(kind: ScopeKind) -> PlaceLoadResolutionNode<'db> {
+    fn node_after_enclosing_scope(kind: ScopeKind) -> PlaceLoadNode<'db> {
         if kind.is_class() {
-            PlaceLoadResolutionNode::ImplicitGlobalSource
+            PlaceLoadNode::ImplicitGlobalSource
         } else {
-            PlaceLoadResolutionNode::Failure(PlaceLoadFailure::UnboundFree)
+            PlaceLoadNode::Failure(PlaceLoadFailure::UnboundFree)
         }
     }
 
@@ -611,7 +600,7 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
     }
 }
 
-pub(crate) enum PlaceLoadResolutionStep<'db> {
+pub(crate) enum PlaceLoadStep<'db> {
     // A source that can supply the value for a load.
     Source(PlaceLoadSource<'db>),
     // A condition that the caller must evaluate to determine whether resolution should continue
@@ -626,7 +615,7 @@ pub(crate) enum PlaceLoadResolutionStep<'db> {
 ///
 /// ## How constraint tracking is implemented
 ///
-/// [`PlaceLoadResolution`] stores one shared list of constraint keys. Each
+/// [`PlaceLoadSources`] stores one shared list of constraint keys. Each
 /// source maintains an `entry_checkpoint` into that list, which identifies the
 /// constraints used to narrow the source.
 ///
@@ -660,7 +649,7 @@ pub(crate) enum PlaceLoadResolutionStep<'db> {
 /// requested is schematically:
 ///
 /// ```text
-/// PlaceLoadResolution {
+/// PlaceLoadSources {
 ///     constraint_keys: [
 ///         (next_value, UseId(U)),
 ///     ],
@@ -873,7 +862,7 @@ pub(crate) enum PlaceExprPrefixLoad {
 
 /// Read-only context used to select sources for a place load.
 #[derive(Clone, Copy)]
-struct PlaceLoadResolutionContext<'db, 'ast> {
+struct PlaceLoadContext<'db, 'ast> {
     db: &'db dyn Db,
     index: &'db SemanticIndex<'db>,
     scope: ScopeId<'db>,
@@ -881,7 +870,7 @@ struct PlaceLoadResolutionContext<'db, 'ast> {
     mode: PlaceLoadMode<'ast>,
 }
 
-impl<'db> PlaceLoadResolutionContext<'db, '_> {
+impl<'db> PlaceLoadContext<'db, '_> {
     fn symbol_has_scope_declaration(self, place_expr: PlaceExprRef) -> bool {
         let Some(symbol) = place_expr.as_symbol() else {
             return false;
@@ -1032,13 +1021,13 @@ impl<'db> PlaceLoadResolutionContext<'db, '_> {
     }
 }
 
-/// A node in the acyclic graph traversed by a [`PlaceLoadResolution`].
+/// A node in the acyclic graph traversed by [`PlaceLoadSources`].
 ///
-/// Source-named nodes may yield a [`PlaceLoadResolutionStep::Source`]. The two verb-named nodes
+/// Source-named nodes may yield a [`PlaceLoadStep::Source`]. The two verb-named nodes
 /// either ask the consumer whether traversal should continue or decide which outgoing edge to
-/// follow. Every transition advances toward a [`PlaceLoadResolutionNode::Failure`] leaf; no node
+/// follow. Every transition advances toward a [`PlaceLoadNode::Failure`] leaf; no node
 /// is revisited.
-enum PlaceLoadResolutionNode<'db> {
+enum PlaceLoadNode<'db> {
     /// The source selected from the load's own scope, if one exists.
     LocalSource,
     /// Ask the consumer whether resolution should continue for a member load.

@@ -23,8 +23,7 @@ use crate::place::{
     loop_header_reachability, place_from_bindings,
 };
 use crate::place_load::{
-    ImplicitPlaceLoad, PlaceLoadMode, PlaceLoadResolutionStep, PlaceLoadSourceKind,
-    resolve_place_load,
+    ImplicitPlaceLoad, PlaceLoadMode, PlaceLoadSourceKind, PlaceLoadStep, place_load_sources,
 };
 use crate::types::ide_support::{ImportAliasResolution, definition_for_name};
 use crate::types::list_members::{all_members, all_reachable_members};
@@ -810,14 +809,14 @@ impl<'db> SemanticModel<'db> {
             definitions.extend_from_slice(resolution.definitions());
         };
         if let ast::Expr::Name(name) = receiver {
-            let mut resolution = resolve_place_load(
+            let mut resolution = place_load_sources(
                 self.db,
                 index,
                 scope.to_scope_id(self.db, self.file),
                 PlaceExpr::from_expr_name(name),
                 PlaceLoadMode::AtExpression(name.into()),
             );
-            while let Some(PlaceLoadResolutionStep::Source(source)) = resolution.next() {
+            while let Some(PlaceLoadStep::Source(source)) = resolution.next() {
                 match source.kind {
                     PlaceLoadSourceKind::Bindings(bindings) => {
                         let bound = place_from_bindings(
